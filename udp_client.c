@@ -7,9 +7,9 @@
 #include <unistd.h>
 #include <string.h>
 
-#define SERVER "127.0.0.1"
+#define SERVER "137.112.38.47"
 #define MESSAGE "hello there"
-#define PORT 9876
+#define PORT 2526
 #define BUFSIZE 1024
 
 int main() {

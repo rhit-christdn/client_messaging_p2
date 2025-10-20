@@ -1,182 +1,325 @@
-/************* UDP CLIENT CODE *******************/
-
+/******************************************************************************
+ * File: udp_client.c
+ * Author: Wyatt Ronn and Dylan Christopherson
+ * Due: 10/21/2025
+ * 
+ * Description:
+ *   This program is a UDP client that communicates with a server
+ *   using the RHP and RHMP. It demonstrates creating and sending 
+ *   RHP messages with payloads of even and odd lengths, receiving 
+ *   and validating RHP messages using a 16-bit Internet checksum, 
+ *   creating and sending RHMP messages of different types, and 
+ *   receiving and decoding RHMP responses including payloads and IDs.
+ *
+ ******************************************************************************/
 #include <stdio.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
-#include <unistd.h>
-#include <string.h>
 #include <stdint.h>
+#include <string.h>
+#include <arpa/inet.h>
+#include <sys/socket.h>
+#include <unistd.h>
 
-#define SERVER "137.112.38.47"
-#define PORT 2526
-#define BUFSIZE 1024
+#define SERVER "137.112.38.47" // Server's IP
+#define PORT 2526 //Given port number
+#define BUFSIZE 1024 //Buffer size
 
-//Computes the checksum of the given buffer
+//Computes 16-bit internet checksum on a given buffer
 unsigned short checksum(unsigned short *buf, int nwords) {
     unsigned long sum = 0;
-	//sum all of the buffer
     for (; nwords > 0; nwords--)
         sum += *buf++;
-    while (sum >> 16) //put carry into lower 16
+    while (sum >> 16)
         sum = (sum & 0xFFFF) + (sum >> 16);
-    return (unsigned short)(~sum); // return 1's complement
+    return (unsigned short)(~sum);
 }
 
-//Defines rhp_header as based on project description
-#pragma pack(push,1) // ensures the header doesn't chnage size to accomidate for spacing
-struct rhp_header {
-    uint8_t  version;
-    uint16_t srcPort;
-    uint16_t dstPort;
-    uint16_t length_type;
-    uint8_t  buffer;
-};
-#pragma pack(pop)
+//Sends a RHP message with given payload to the given server
+int send_rhp_message(int sock, struct sockaddr_in *serverAddr, const char *payload) {
+    uint8_t buffer[BUFSIZE];
+    memset(buffer, 0, BUFSIZE);
+
+    int payload_len = strlen(payload);
+    int index = 0;
+
+	//RHP header infromation
+    buffer[index++] = 12; //version
+    buffer[index++] = (2902) & 0xFF; //source port LSB
+    buffer[index++] = (2902 >> 8) & 0xFF; //source port MSP
+    buffer[index++] = (0x1874) & 0xFF; //destination port LSB
+    buffer[index++] = (0x1874 >> 8) & 0xFF; // destination port MSB
+    buffer[index++] = (payload_len) & 0xF; //length LSB
+    buffer[index++] = (payload_len >> 8) & 0xFF; //length MSP and type
+
+	//padding for even length payloads
+    if (payload_len % 2 == 0) {
+        buffer[index++] = 0;
+    }
+
+	//copy payload into the buffer
+    memcpy(buffer + index, payload, payload_len);
+    index += payload_len;
 	
+	//Leave space for the checksum
+    int checksum_index = index;
+    buffer[index++] = 0;
+    buffer[index++] = 0;
 
-#pragma pack(push,1) // ensures the header doesn't chnage size to accomidate for spacing
-struct rhmp_header {
-    unsigned int commID:14;
-    unsigned int type:6;
-    unsigned int length:12;
-};
-#pragma pack(pop)
+	//Calculate the checksum
+    unsigned short csum = checksum((unsigned short *)buffer, index/2);
+    memcpy(buffer + checksum_index, &csum, 2);
 
-int sendMSG(struct sockaddr_in serverAddr, int clientSocket, const char* message, uint8_t type) {
-    /* Configure settings in server address struct */
-    memset((char*) &serverAddr, 0, sizeof (serverAddr));
+    printf("Sending RHP message: %s\n", payload);
+
+	//sends message to socket
+    if (sendto(sock, buffer, index, 0, (struct sockaddr *)serverAddr, sizeof(*serverAddr)) < 0) {
+        perror("sendto failed");
+        return -1;
+    }
+
+    return payload_len;
+}
+
+//Receives and interpret RHP response
+int receive_rhp_response(int sock, struct sockaddr_in *serverAddr, int payload_len) {
+    uint8_t buffer[BUFSIZE];
+    socklen_t addrLen = sizeof(*serverAddr);
+
+    int nBytes = recvfrom(sock, buffer, BUFSIZE, 0, (struct sockaddr *)serverAddr, &addrLen);
+
+	//get header information out of buffer
+    uint8_t version = buffer[0];
+    uint16_t srcPort = buffer[1] | (buffer[2] << 8);
+    uint16_t dstPort = buffer[3] | (buffer[4] << 8);
+    uint16_t length = buffer[5] & 0xFF;
+    length = ((buffer[6] & 0xF) << 8) | length;
+    uint8_t type = buffer[6] & 0xF;
+
+	//start index for payload
+    int payload_start = (payload_len % 2 == 0) ? 8 : 7;
+
+	//get the observed checksum
+    uint16_t checksum2;
+    memcpy(&checksum2, buffer + nBytes - 2, 2);
+
+	//Recalculate the checksum
+    buffer[nBytes-2] = 0;
+    buffer[nBytes-1] = 0;
+    unsigned short *buf16 = (unsigned short *)buffer;
+    int nwords = nBytes / 2;
+    unsigned short calc_checksum = checksum(buf16, nwords);
+
+	//print all header information recieved
+    printf("Message received:\n");
+    printf(" RHP version: %d\n", version);
+    printf(" RHP type: %d\n", type);
+    printf(" srcPort: %d (0x%X)\n", srcPort, srcPort);
+    printf(" dstPort: %d (0x%X)\n", dstPort, dstPort);
+    printf(" length: %d\n", length);
+    printf(" checksum: 0x%X\n", checksum2);
+    printf(" checksum calculated: 0x%X\n", calc_checksum);
+
+	//verifies the checksum
+    if (calc_checksum == checksum2) {
+        printf(" checksum passed\n");
+        printf(" Payload: ");
+        fwrite(buffer + payload_start, 1, length, stdout);
+        printf("\n");
+        return 1;
+    } else {
+		printf(" checksum failed\n");
+		printf(" Payload: ");
+        fwrite(buffer + payload_start, 1, length, stdout);
+        printf("\n");
+        return 0;
+    }
+}
+
+//sends an RHMP message with a specified type
+int send_rhmp_message(int sock, struct sockaddr_in *serverAddr, int type) {
+    uint8_t buffer[BUFSIZE];
+    uint8_t buffer2[BUFSIZE];
+    memset(buffer, 0, BUFSIZE);
+    memset(buffer2, 0, BUFSIZE);
+
+	//Create RHMP header information
+    int index2 = 0;
+    uint16_t commID = 0x312;
+    uint16_t rhmp_len = 0; 
+    buffer2[index2++] = commID & 0xFF;
+    buffer2[index2++] = ((commID >> 8) & 0x3F) | ((type & 0x3) << 6);
+    buffer2[index2++] = ((rhmp_len & 0xF) << 4) | ((type >> 2) & 0xF);
+    buffer2[index2++] = (rhmp_len >> 8) & 0x0F;
+
+    int payload_len = index2;
+	
+	//create RHP header
+    int index = 0;
+    buffer[index++] = 12; 
+    buffer[index++] = (2902) & 0xFF; 
+    buffer[index++] = (2902 >> 8) & 0xFF;
+    buffer[index++] = (0xECE) & 0xFF;
+    buffer[index++] = (0xECE >> 8) & 0xFF;
+    buffer[index++] = payload_len & 0xFF;
+    buffer[index++] = ((payload_len >> 8) & 0x0F) | ((4 & 0x0F) << 4);
+    buffer[index++] = 0;
+	
+	//put RHMP header into RHP payload
+    memcpy(buffer + index, buffer2, payload_len);
+    index += payload_len;
+
+	//Calculate the checksum
+    int checksum_index = index;
+    buffer[index++] = 0;
+    buffer[index++] = 0;
+    unsigned short *buf16 = (unsigned short *)buffer;
+    int nwords = index / 2;
+    unsigned short csum = checksum(buf16, nwords);
+    memcpy(buffer + checksum_index, &csum, 2);
+	
+	//print type of message
+	if(type == 4){
+		printf("Sending RHMP message: Message Request\n");
+	}
+	if(type == 16){
+		printf("Sending RHMP message: ID Request\n");
+	}
+
+	//sends message through socket
+    if (sendto(sock, buffer, index, 0, (struct sockaddr *)serverAddr, sizeof(*serverAddr)) < 0) {
+        perror("sendto failed");
+        return -1;
+    }
+
+    return payload_len;
+}
+
+//Receive and interpret RHMP messgae
+int receive_rhmp_response(int sock, struct sockaddr_in *serverAddr, int payload_len) {
+    uint8_t buffer[BUFSIZE];
+    socklen_t addrLen = sizeof(*serverAddr);
+
+    int nBytes = recvfrom(sock, buffer, BUFSIZE, 0, (struct sockaddr *)serverAddr, &addrLen);
+
+	//Gets RHP header information
+    uint8_t version = buffer[0];
+    uint16_t srcPort = buffer[1] | (buffer[2] << 8);
+    uint16_t dstPort = buffer[3] | (buffer[4] << 8);
+    uint16_t length = buffer[5] & 0xFF;
+    length = ((buffer[6] & 0xF) << 8) | length;
+    uint8_t type = (buffer[6] << 8) & 0xF;
+
+    int payload_start = (payload_len % 2 == 0) ? 8 : 7;
+
+	//Recalculate the checksum
+    uint16_t checksum2;
+    memcpy(&checksum2, buffer + nBytes - 2, 2);
+
+    buffer[nBytes - 2] = 0;
+    buffer[nBytes - 1] = 0;
+    unsigned short *buf16 = (unsigned short *)buffer;
+    int nwords = nBytes / 2;
+    unsigned short calc_checksum = checksum(buf16, nwords);
+
+	//print all RHP information received
+    printf("Message received:\n");
+    printf(" RHP version: %d\n", version);
+    printf(" RHP type: %d\n", type);
+    printf(" srcPort: %d (0x%X)\n", srcPort, srcPort);
+    printf(" dstPort: %d (0x%X)\n", dstPort, dstPort);
+    printf(" length: %d\n", length);
+    printf(" checksum: 0x%X\n", checksum2);
+    printf(" checksum calculated: 0x%X\n", calc_checksum);
+		
+	//print all RHMP information received
+	uint16_t comm_id = buffer[payload_start] | ((buffer[payload_start+1] & 0x3F) << 8);
+	uint8_t type2 = ((buffer[payload_start+1] >> 6) & 0x3) | ((buffer[payload_start+2] & 0xF) << 2);
+	uint16_t length2 = ((buffer[payload_start+2] >> 4) & 0xF) | (buffer[payload_start+3] << 4);
+
+	//checks the checksum
+    if (calc_checksum == checksum2) {
+	    printf(" checksum passed\n");
+		printf("\n");
+		printf(" RHMP Comm_ID: %d (0x%X)\n", comm_id, comm_id);
+    	printf(" RHMP type: %d\n", type2);
+		printf(" RHMP length: %d\n", length2);
+		printf(" Payload: ");
+		if(type2 == 6){
+			fwrite(buffer + payload_start + 4, 1, length2, stdout);
+		}
+		if(type2 == 24){//I put the id in little endian because that is what was most common in this project
+			uint32_t id = buffer[payload_start+4] | (buffer[payload_start+5] << 8) | (buffer[payload_start+6] << 16) | (buffer[payload_start+7] << 24);
+			printf("%d (0x%X)\n", id, id);
+		}
+    	printf("\n");
+        return 1;
+    } else {
+		printf(" checksum failed\n");
+		printf("\n");
+		printf(" RHMP Comm_ID: %d (0x%X)\n", comm_id, comm_id);
+    	printf(" RHMP type: %d\n", type2);
+		printf(" RHMP length: %d\n", length2);
+		printf(" Payload: ");
+		if(type2 == 6){
+			fwrite(buffer + payload_start + 4, 1, length2, stdout);
+		}
+		if(type2 == 24){
+			uint32_t id = buffer[payload_start+4] | (buffer[payload_start+5] << 8) | (buffer[payload_start+6] << 16) | (buffer[payload_start+7] << 24);
+			printf("%d (0x%X)\n", id, id);
+		}
+    	printf("\n");
+        return 0;
+    }
+}
+
+//starting point for the code
+int main() {
+    int sock;
+    struct sockaddr_in serverAddr;
+
+	//creates socket
+    if ((sock = socket(AF_INET, SOCK_DGRAM, 0)) < 0) {
+        perror("socket failed");
+        return 1;
+    }
+
+	//configure address
+    memset(&serverAddr, 0, sizeof(serverAddr));
     serverAddr.sin_family = AF_INET;
     serverAddr.sin_port = htons(PORT);
     serverAddr.sin_addr.s_addr = inet_addr(SERVER);
-    memset(serverAddr.sin_zero, '\0', sizeof serverAddr.sin_zero);
 
-	//create header
-	char sendbuf[BUFSIZE];
-    struct rhp_header header;
-
-	//fill in info for the header
-    header.version = 12;
-    header.srcPort = htons(0x6337);
-    if (type == 1) {
-        header.dstPort = htons(0xECE);
-        header.length_type = htons(((strlen(message) & 0x0FFF) << 4) | 4); // set type to 4 for RHMP
-    } else {
-        header.dstPort = htons(0x1874);
-        header.length_type = htons(((strlen(message) & 0x0FFF) << 4) | 0); // set type to 0 for RHP
+	//1. one RHP control message with the string “hi” (odd length)
+    int c1 = 0;
+    while (!c1) { // repeats until a valid response is acheived
+		int sent_len = send_rhp_message(sock, &serverAddr, "hello");
+        c1 = receive_rhp_response(sock, &serverAddr, sent_len);
+        printf("\n");
     }
-    header.buffer  = 0x00;
-
-	// copy header and payload for the send buffer
-    int offset = 0;
-    memcpy(sendbuf + offset, &header, sizeof(header));
-    offset += sizeof(header);
-    memcpy(sendbuf + offset, message, strlen(message));
-    offset += strlen(message);
-
-    if (offset % 2 != 0) {                      // ensure even length
-        sendbuf[offset++] = 0x00;
-    }
-
-	//computes the checksum
-    unsigned short cksum = checksum((unsigned short*)sendbuf, offset/2);
-    memcpy(sendbuf + offset, &cksum, 2);
-    offset += 2;
 	
-	printf("Sending RHP message: %s\n", message);
+	//2. one RHP control message with the string “hello” (even length)
+    int c2 = 0;
+    while (!c2) {
+		int sent_len = send_rhp_message(sock, &serverAddr, "hi");
+        c2 = receive_rhp_response(sock, &serverAddr, sent_len);
+        printf("\n");
+    }
 	
-    /* send a message to the server */
-    if (sendto(clientSocket, sendbuf, offset, 0, (struct sockaddr *)&serverAddr, sizeof(serverAddr)) < 0) {
-        perror("sendto failed");
-        return 0;
+	//3. one RHMP message of type Message_Request
+	int c3 = 0;
+    while (!c3) {
+		int sent_len = send_rhmp_message(sock, &serverAddr, 4);
+        c3 = receive_rhmp_response(sock, &serverAddr, sent_len);
+        printf("\n");
     }
 
-    return 0;
-}
-
-int buildRHMPpayload(char* buffer, uint8_t type, uint32_t payload) {
-    struct rhmp_header rhmp;
-    rhmp.commID = htons(0x312);
-    rhmp.type = type;
-    rhmp.length = size_t(payload);
-
-    memcpy(buffer, &rhmp, sizeof(rhmp));
-    return sizeof(rhmp);
-}
-
-int receiveMSG(int nBytes, int clientSocket, char* buffer) {
-     /* Receive message from server */
-    nBytes = recvfrom(clientSocket, buffer, BUFSIZE, 0, NULL, NULL);
+	//4. one RHMP message of type ID_Request
+	int c4 = 0;
+    while (!c4) {
+		int sent_len = send_rhmp_message(sock, &serverAddr, 16);
+        c4 = receive_rhmp_response(sock, &serverAddr, sent_len);
+        printf("\n");
+    }
 	
-	//print out all of the return values for the header
-	struct rhp_header *rhp = (struct rhp_header *)buffer;
-    printf("Received from server:\n");
-    printf(" RHP version: %d\n", rhp->version);
-	printf(" RHP type: %d\n", ntohs(rhp->length_type) & 0x000F);
-    printf(" srcPort: %d (0x%X)\n", rhp->srcPort, rhp->srcPort);
-    printf(" dstPort: %d (0x%X)\n", ntohs(rhp->dstPort), ntohs(rhp->dstPort));
-    printf(" length: %d\n", (rhp->length_type >> 4) & 0x0FFF);
-	
-	//checks to see if the checksum passes
-	unsigned short recv_cksum = *(uint16_t*)(buffer + nBytes - 2);
-    if (checksum((unsigned short*)buffer, (nBytes-2)/2) == recv_cksum) {
-        printf(" checksum passed\n");
-        printf(" checksum: 0x%X\n", recv_cksum);
-
-        printf("\n-------------------\n\n");
-
-        return 0; // indicate success
-    } else {
-        printf(" checksum failed\n");
-        printf(" checksum: 0x%X\n", recv_cksum);
-
-        printf("\n-------------------\n\n");
-
-        return 1; // indicate failure
-    }
-}
-	
-int main() {
-    int clientSocket, nBytes;
-    char buffer[BUFSIZE];
-    struct sockaddr_in clientAddr, serverAddr;
-
-    /*Create UDP socket*/
-    if ((clientSocket = socket(AF_INET, SOCK_DGRAM, 0)) < 0) {
-        perror("cannot create socket");
-        return 0;
-    }
-
-    /* Bind to an arbitrary return address.
-     * Because this is the client side, we don't care about the address 
-     * since no application will initiate communication here - it will 
-     * just send rhponses 
-     * INADDR_ANY is the IP address and 0 is the port (allow OS to select port) 
-     * htonl converts a long integer (e.g. address) to a network representation 
-     * htons converts a short integer (e.g. port) to a network representation */
-    memset((char *) &clientAddr, 0, sizeof (clientAddr));
-    clientAddr.sin_family = AF_INET;
-    clientAddr.sin_addr.s_addr = htonl(INADDR_ANY);
-    clientAddr.sin_port = htons(0);
-
-    if (bind(clientSocket, (struct sockaddr *) &clientAddr, sizeof (clientAddr)) < 0) {
-        perror("bind failed");
-        return 0;
-    }
-
-    sendMSG(serverAddr, clientSocket, "hi", 0); //odd length, RHP message
-    while (receiveMSG(nBytes, clientSocket, buffer)){
-        sendMSG(serverAddr, clientSocket, "hi", 0); // send until valid message received
-    }
-
-    sendMSG(serverAddr, clientSocket, "hello", 0); //even length, RHP message
-    while (receiveMSG(nBytes, clientSocket, buffer)){
-        sendMSG(serverAddr, clientSocket, "hello", 0); // send until valid message received
-    }
-
-    sendMSG(serverAddr, clientSocket, "This is a test message for RHMP.", 1); // RHMP message
-
-	
-    close(clientSocket);
+    close(sock);
     return 0;
 }

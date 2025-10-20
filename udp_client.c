@@ -40,12 +40,10 @@ struct rhmp_header {
     unsigned int commID:14;
     unsigned int type:6;
     unsigned int length:12;
-    uint16_t length_type;
-    unsigned int payload:24;
 };
 #pragma pack(pop)
 
-int sendRHP(struct sockaddr_in serverAddr, int clientSocket, const char* message) {
+int sendMSG(struct sockaddr_in serverAddr, int clientSocket, const char* message, uint8_t type) {
     /* Configure settings in server address struct */
     memset((char*) &serverAddr, 0, sizeof (serverAddr));
     serverAddr.sin_family = AF_INET;
@@ -59,9 +57,14 @@ int sendRHP(struct sockaddr_in serverAddr, int clientSocket, const char* message
 
 	//fill in info for the header
     header.version = 12;
-    header.srcPort = htons(0x2902);
-    header.dstPort = htons(0x1874);
-    header.length_type = htons(((strlen(message) & 0x0FFF) << 4) | 0);
+    header.srcPort = htons(0x6337);
+    if (type == 1) {
+        header.dstPort = htons(0xECE);
+        header.length_type = htons(((strlen(message) & 0x0FFF) << 4) | 4); // set type to 4 for RHMP
+    } else {
+        header.dstPort = htons(0x1874);
+        header.length_type = htons(((strlen(message) & 0x0FFF) << 4) | 0); // set type to 0 for RHP
+    }
     header.buffer  = 0x00;
 
 	// copy header and payload for the send buffer
@@ -89,6 +92,16 @@ int sendRHP(struct sockaddr_in serverAddr, int clientSocket, const char* message
     }
 
     return 0;
+}
+
+int buildRHMPpayload(char* buffer, uint8_t type, uint32_t payload) {
+    struct rhmp_header rhmp;
+    rhmp.commID = htons(0x312);
+    rhmp.type = type;
+    rhmp.length = size_t(payload);
+
+    memcpy(buffer, &rhmp, sizeof(rhmp));
+    return sizeof(rhmp);
 }
 
 int receiveMSG(int nBytes, int clientSocket, char* buffer) {
@@ -151,15 +164,17 @@ int main() {
         return 0;
     }
 
-    sendRHP(serverAddr, clientSocket, "hi"); //odd length
+    sendMSG(serverAddr, clientSocket, "hi", 0); //odd length, RHP message
     while (receiveMSG(nBytes, clientSocket, buffer)){
-        sendRHP(serverAddr, clientSocket, "hi"); // send until valid message received
+        sendMSG(serverAddr, clientSocket, "hi", 0); // send until valid message received
     }
 
-    sendRHP(serverAddr, clientSocket, "hello"); //even length
+    sendMSG(serverAddr, clientSocket, "hello", 0); //even length, RHP message
     while (receiveMSG(nBytes, clientSocket, buffer)){
-        sendRHP(serverAddr, clientSocket, "hello"); // send until valid message received
+        sendMSG(serverAddr, clientSocket, "hello", 0); // send until valid message received
     }
+
+    sendMSG(serverAddr, clientSocket, "This is a test message for RHMP.", 1); // RHMP message
 
 	
     close(clientSocket);

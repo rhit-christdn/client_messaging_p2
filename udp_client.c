@@ -6,9 +6,9 @@
 #include <arpa/inet.h>
 #include <unistd.h>
 #include <string.h>
+#include <stdint.h>
 
 #define SERVER "137.112.38.47"
-#define MESSAGE "hello"
 #define PORT 2526
 #define BUFSIZE 1024
 
@@ -33,6 +33,89 @@ struct rhp_header {
     uint8_t  buffer;
 };
 #pragma pack(pop)
+	
+
+#pragma pack(push,1) // ensures the header doesn't chnage size to accomidate for spacing
+struct rhmp_header {
+    unsigned int commID:14;
+    unsigned int type:6;
+    unsigned int length:12;
+    uint16_t length_type;
+    unsigned int payload:24;
+};
+#pragma pack(pop)
+
+int sendRHP(struct sockaddr_in serverAddr, int clientSocket, const char* message) {
+    /* Configure settings in server address struct */
+    memset((char*) &serverAddr, 0, sizeof (serverAddr));
+    serverAddr.sin_family = AF_INET;
+    serverAddr.sin_port = htons(PORT);
+    serverAddr.sin_addr.s_addr = inet_addr(SERVER);
+    memset(serverAddr.sin_zero, '\0', sizeof serverAddr.sin_zero);
+
+	//create header
+	char sendbuf[BUFSIZE];
+    struct rhp_header header;
+
+	//fill in info for the header
+    header.version = 12;
+    header.srcPort = htons(0x2902);
+    header.dstPort = htons(0x1874);
+    header.length_type = htons(((strlen(message) & 0x0FFF) << 4) | 0);
+    header.buffer  = 0x00;
+
+	// copy header and payload for the send buffer
+    int offset = 0;
+    memcpy(sendbuf + offset, &header, sizeof(header));
+    offset += sizeof(header);
+    memcpy(sendbuf + offset, message, strlen(message));
+    offset += strlen(message);
+
+    if (offset % 2 != 0) {                      // ensure even length
+        sendbuf[offset++] = 0x00;
+    }
+
+	//computes the checksum
+    unsigned short cksum = checksum((unsigned short*)sendbuf, offset/2);
+    memcpy(sendbuf + offset, &cksum, 2);
+    offset += 2;
+	
+	printf("Sending RHP message: %s\n", message);
+	
+    /* send a message to the server */
+    if (sendto(clientSocket, sendbuf, offset, 0, (struct sockaddr *)&serverAddr, sizeof(serverAddr)) < 0) {
+        perror("sendto failed");
+        return 0;
+    }
+
+    return 0;
+}
+
+int receiveMSG(int nBytes, int clientSocket, char* buffer) {
+     /* Receive message from server */
+    nBytes = recvfrom(clientSocket, buffer, BUFSIZE, 0, NULL, NULL);
+	
+	//print out all of the return values for the header
+	struct rhp_header *rhp = (struct rhp_header *)buffer;
+    printf("Received from server:\n");
+    printf(" RHP version: %d\n", rhp->version);
+	printf(" RHP type: %d\n", ntohs(rhp->length_type) & 0x000F);
+    printf(" srcPort: %d (0x%X)\n", rhp->srcPort, rhp->srcPort);
+    printf(" dstPort: %d (0x%X)\n", ntohs(rhp->dstPort), ntohs(rhp->dstPort));
+    printf(" length: %d\n", (rhp->length_type >> 4) & 0x0FFF);
+	
+	//checks to see if the checksum passes
+	unsigned short recv_cksum = *(uint16_t*)(buffer + nBytes - 2);
+    if (checksum((unsigned short*)buffer, (nBytes-2)/2) == recv_cksum) {
+        printf(" checksum passed\n");
+    } else {
+        printf(" checksum failed\n");
+    }
+	
+	printf(" checksum: 0x%X\n", recv_cksum);
+
+    return 0;
+}
 	
 int main() {
     int clientSocket, nBytes;
@@ -62,69 +145,14 @@ int main() {
         return 0;
     }
 
-    /* Configure settings in server address struct */
-    memset((char*) &serverAddr, 0, sizeof (serverAddr));
-    serverAddr.sin_family = AF_INET;
-    serverAddr.sin_port = htons(PORT);
-    serverAddr.sin_addr.s_addr = inet_addr(SERVER);
-    memset(serverAddr.sin_zero, '\0', sizeof serverAddr.sin_zero);
+    sendRHP(serverAddr, clientSocket, "hi"); //odd length
+    receiveMSG(nBytes, clientSocket, buffer);
 
-	//create header
-	char sendbuf[BUFSIZE];
-    struct rhp_header header;
+    printf("\n-------------------\n\n");
 
-	//fill in info for the header
-    header.version = 12;
-    header.srcPort = htons(0x2902);
-    header.dstPort = htons(0x1874);
-    header.length_type = htons(((strlen(MESSAGE) & 0x0FFF) << 4) | 0);
-    header.buffer  = 0x00;
+    sendRHP(serverAddr, clientSocket, "hello"); //even length
+    receiveMSG(nBytes, clientSocket, buffer);
 
-	// copy header and payload for the send buffer
-    int offset = 0;
-    memcpy(sendbuf + offset, &header, sizeof(header));
-    offset += sizeof(header);
-    memcpy(sendbuf + offset, MESSAGE, strlen(MESSAGE));
-    offset += strlen(MESSAGE);
-
-    if (offset % 2 != 0) {                      // ensure even length
-        sendbuf[offset++] = 0x00;
-    }
-
-	//computes the checksum
-    unsigned short cksum = checksum((unsigned short*)sendbuf, offset/2);
-    memcpy(sendbuf + offset, &cksum, 2);
-    offset += 2;
-	
-	printf("Sending RHP message: %s\n", MESSAGE);
-	
-    /* send a message to the server */
-    if (sendto(clientSocket, sendbuf, offset, 0, (struct sockaddr *)&serverAddr, sizeof(serverAddr)) < 0) {
-        perror("sendto failed");
-        return 0;
-    }
-
-    /* Receive message from server */
-    nBytes = recvfrom(clientSocket, buffer, BUFSIZE, 0, NULL, NULL);
-	
-	//print out all of the return values for the header
-	struct rhp_header *rhp = (struct rhp_header *)buffer;
-    printf("Received from server:\n");
-    printf(" RHP version: %d\n", rhp->version);
-	printf(" RHP type: %d\n", ntohs(rhp->length_type) & 0x000F);
-    printf(" srcPort: %d (0x%X)\n", rhp->srcPort, rhp->srcPort);
-    printf(" dstPort: %d (0x%X)\n", ntohs(rhp->dstPort), ntohs(rhp->dstPort));
-    printf(" length: %d\n", (rhp->length_type >> 4) & 0x0FFF);
-	
-	//checks to see if the checksum passes
-	unsigned short recv_cksum = *(uint16_t*)(buffer + nBytes - 2);
-    if (checksum((unsigned short*)buffer, (nBytes-2)/2) == recv_cksum) {
-        printf(" checksum passed\n");
-    } else {
-        printf(" checksum failed\n");
-    }
-	
-	printf(" checksum: 0x%X\n", recv_cksum);
 	
     close(clientSocket);
     return 0;

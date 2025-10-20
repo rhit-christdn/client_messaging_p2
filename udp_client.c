@@ -11,6 +11,17 @@
 #define SERVER "137.112.38.47"
 #define PORT 2526
 #define BUFSIZE 1024
+#define STUDENT_ID_LAST4 2904
+
+#define RESERVED_TYPE 0
+#define MESSAGE_REQUEST_TYPE 4
+#define MESSAGE_RESPONSE_TYPE 6
+#define ID_REQUEST_TYPE 16
+#define ID_RESPONSE_TYPE 24
+
+#define RHP_TYPE 0
+#define RHMP_TYPE 4
+
 
 //Computes the checksum of the given buffer
 unsigned short checksum(unsigned short *buf, int nwords) {
@@ -23,70 +34,57 @@ unsigned short checksum(unsigned short *buf, int nwords) {
     return (unsigned short)(~sum); // return 1's complement
 }
 
-//Defines rhp_header as based on project description
-#pragma pack(push,1) // ensures the header doesn't chnage size to accomidate for spacing
-struct rhp_header {
-    uint8_t  version;
-    uint16_t srcPort;
-    uint16_t dstPort;
-    uint16_t length_type;
-    uint8_t  buffer;
-};
-#pragma pack(pop)
-	
-
-#pragma pack(push,1) // ensures the header doesn't chnage size to accomidate for spacing
-struct rhmp_header {
-    unsigned int commID:14;
-    unsigned int type:6;
-    unsigned int length:12;
-};
-#pragma pack(pop)
-
-int sendMSG(struct sockaddr_in serverAddr, int clientSocket, const char* message, uint8_t type) {
-    /* Configure settings in server address struct */
-    memset((char*) &serverAddr, 0, sizeof (serverAddr));
-    serverAddr.sin_family = AF_INET;
-    serverAddr.sin_port = htons(PORT);
-    serverAddr.sin_addr.s_addr = inet_addr(SERVER);
-    memset(serverAddr.sin_zero, '\0', sizeof serverAddr.sin_zero);
-
+int sendMSG(struct sockaddr_in serverAddr, int clientSocket, const char* payload, int payload_len, uint8_t type) {
 	//create header
-	char sendbuf[BUFSIZE];
-    struct rhp_header header;
+	char buffer[BUFSIZE];
+    memset(buffer, 0, BUFSIZE);
+
+    int index = 0;
 
 	//fill in info for the header
-    header.version = 12;
-    header.srcPort = htons(0x6337);
-    if (type == 1) {
-        header.dstPort = htons(0xECE);
-        header.length_type = htons(((strlen(message) & 0x0FFF) << 4) | 4); // set type to 4 for RHMP
-    } else {
-        header.dstPort = htons(0x1874);
-        header.length_type = htons(((strlen(message) & 0x0FFF) << 4) | 0); // set type to 0 for RHP
+    buffer[index++] = 12;
+    buffer[index++] = (STUDENT_ID_LAST4 >> 8) & 0xFF;
+    buffer[index++] = STUDENT_ID_LAST4 & 0xFF;
+
+    uint16_t dstport = 0x0ECE;
+
+    if (type == RHP_TYPE) {
+        uint16_t dstport = 0x1874;
     }
-    header.buffer  = 0x00;
+    buffer[index++] = (dstport >> 8) & 0xFF;
+    buffer[index++] = dstport & 0xFF;
+
+    uint16_t length_type = ((payload_len & 0x0FFF) << 4) | (type & 0x000F);
+    buffer[index++] = (length_type >> 8) & 0xFF;
+    buffer[index++] = length_type & 0xFF;
+
 
 	// copy header and payload for the send buffer
-    int offset = 0;
-    memcpy(sendbuf + offset, &header, sizeof(header));
-    offset += sizeof(header);
-    memcpy(sendbuf + offset, message, strlen(message));
-    offset += strlen(message);
+    memcpy(buffer + index, &payload, payload_len);
+    index += payload_len;
 
-    if (offset % 2 != 0) {                      // ensure even length
-        sendbuf[offset++] = 0x00;
+    if (index % 2 != 0) {                      // ensure even length
+        buffer[index++] = 0x00;
     }
 
+    int checkIndex = index; // position to insert checksum
+    buffer[index++] = 0;
+    buffer[index++] = 0;
+
+
 	//computes the checksum
-    unsigned short cksum = checksum((unsigned short*)sendbuf, offset/2);
-    memcpy(sendbuf + offset, &cksum, 2);
-    offset += 2;
-	
-	printf("Sending RHP message: %s\n", message);
+    unsigned short *buf16 = (unsigned short *)buffer;
+    int nwords = index / 2;
+    unsigned short csum = checksum(buf16, nwords);
+    memcpy(buffer + checkIndex, &csum, 2);
+
+    if (type == RHP_TYPE)
+	printf("Sending RHP message: %s\n", payload);
+    else
+    printf("Sending RHMP message\n");
 	
     /* send a message to the server */
-    if (sendto(clientSocket, sendbuf, offset, 0, (struct sockaddr *)&serverAddr, sizeof(serverAddr)) < 0) {
+    if (sendto(clientSocket, buffer, index, 0, (struct sockaddr *)&serverAddr, sizeof(serverAddr)) < 0) {
         perror("sendto failed");
         return 0;
     }
@@ -94,31 +92,55 @@ int sendMSG(struct sockaddr_in serverAddr, int clientSocket, const char* message
     return 0;
 }
 
-int buildRHMPpayload(char* buffer, uint8_t type, uint32_t payload) {
-    struct rhmp_header rhmp;
-    rhmp.commID = htons(0x312);
-    rhmp.type = type;
-    rhmp.length = size_t(payload);
-
-    memcpy(buffer, &rhmp, sizeof(rhmp));
-    return sizeof(rhmp);
+int buildRHMPpayload(uint16_t comm_id, uint8_t type, char* out) {
+    uint32_t hdr = ((uint32_t)(comm_id & 0x3FFF) << 18) | ((uint32_t)(type & 0x3F) << 12) | 0;
+    hdr = htonl(hdr);
+    memcpy(out, &hdr, sizeof(hdr));
+    return sizeof(hdr);
 }
 
-int receiveMSG(int nBytes, int clientSocket, char* buffer) {
-     /* Receive message from server */
-    nBytes = recvfrom(clientSocket, buffer, BUFSIZE, 0, NULL, NULL);
-	
-	//print out all of the return values for the header
-	struct rhp_header *rhp = (struct rhp_header *)buffer;
-    printf("Received from server:\n");
-    printf(" RHP version: %d\n", rhp->version);
-	printf(" RHP type: %d\n", ntohs(rhp->length_type) & 0x000F);
-    printf(" srcPort: %d (0x%X)\n", rhp->srcPort, rhp->srcPort);
-    printf(" dstPort: %d (0x%X)\n", ntohs(rhp->dstPort), ntohs(rhp->dstPort));
-    printf(" length: %d\n", (rhp->length_type >> 4) & 0x0FFF);
+int receiveMSG(int sock, struct sockaddr_in *serverAddr, int payload_len) {
+    uint8_t buffer[BUFSIZE];
+    socklen_t addrLen = sizeof(*serverAddr);
+    
+    /* Receive message from server */
+    int nBytes = recvfrom(sock, buffer, BUFSIZE, 0, (struct sockaddr *)serverAddr, &addrLen);
+
+    if (nBytes < 8) {
+        perror("received message too short\n");
+        return 0;
+    }
+
+    uint8_t version = buffer[0];
+    uint16_t resp_srcPort = buffer[1] | (buffer[2] << 8);
+    uint16_t resp_dstPort = buffer[3] | (buffer[4] << 8);
+    uint16_t resp_length = buffer[5] & 0xFF;
+    resp_length = ((buffer[6] & 0xFF) << 8) | resp_length;
+    uint8_t type = buffer[6] & 0x0F;
+
+    int payload_start = (payload_len % 2 == 0) ? 8 : 7;
+
+    uint16_t resp_checksum;
+    memcpy(&resp_checksum, buffer + nBytes - 2, 2);
+
+    buffer[nBytes - 2] = 0;
+    buffer[nBytes - 1] = 0;
+    unsigned short *buf16 = (unsigned short *)buffer;
+    int nwords = nBytes / 2;
+    unsigned short calc_checksum = checksum(buf16, nwords);
+
+
+    printf("Message received:\n");
+    printf(" RHP version: %d\n", version);
+    printf(" RHP type: %d\n", type);
+    printf(" srcPort: %d (0x%X)\n", resp_srcPort, resp_srcPort);
+    printf(" dstPort: %d (0x%X)\n", resp_dstPort, resp_dstPort);
+    printf(" length: %d\n", resp_length);
+    printf(" checksum: 0x%X\n", resp_checksum);
+    printf(" checksum calculated: 0x%X\n", calc_checksum);
 	
 	//checks to see if the checksum passes
-	unsigned short recv_cksum = *(uint16_t*)(buffer + nBytes - 2);
+	unsigned short recv_cksum = ntohs(*(uint16_t*)(buffer + nBytes - 2));
     if (checksum((unsigned short*)buffer, (nBytes-2)/2) == recv_cksum) {
         printf(" checksum passed\n");
         printf(" checksum: 0x%X\n", recv_cksum);
@@ -147,6 +169,12 @@ int main() {
         return 0;
     }
 
+    /* Configure settings in server address struct */
+    memset((char*) &serverAddr, 0, sizeof (serverAddr));
+    serverAddr.sin_family = AF_INET;
+    serverAddr.sin_port = htons(PORT);
+    serverAddr.sin_addr.s_addr = inet_addr(SERVER);
+
     /* Bind to an arbitrary return address.
      * Because this is the client side, we don't care about the address 
      * since no application will initiate communication here - it will 
@@ -174,9 +202,20 @@ int main() {
         sendMSG(serverAddr, clientSocket, "hello", 0); // send until valid message received
     }
 
-    sendMSG(serverAddr, clientSocket, "This is a test message for RHMP.", 1); // RHMP message
+    uint8_t rhmp_payload[4];
+    buildRHMPpayload(0x312, MESSAGE_REQUEST_TYPE, 0, (char*)rhmp_payload);
+    sendMSG(serverAddr, clientSocket, (char*)rhmp_payload, RHMP_TYPE); // RHMP message
+    while (receiveMSG(nBytes, clientSocket, buffer)){
+        sendMSG(serverAddr, clientSocket, (char*)rhmp_payload, RHMP_TYPE); // send until valid message received
+    }
 
-	
+    uint8_t rhmp_payload1[4];
+    buildRHMPpayload(0x312, ID_REQUEST_TYPE, 0, (char*)rhmp_payload1);
+    sendMSG(serverAddr, clientSocket, (char*)rhmp_payload1, RHMP_TYPE); // RHMP message
+    while (receiveMSG(nBytes, clientSocket, buffer)){
+        sendMSG(serverAddr, clientSocket, (char*)rhmp_payload1, RHMP_TYPE); // send until valid message received
+    }
+
     close(clientSocket);
     return 0;
 }

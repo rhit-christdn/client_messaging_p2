@@ -108,13 +108,19 @@ int receiveMSG(int nBytes, int clientSocket, char* buffer) {
 	unsigned short recv_cksum = *(uint16_t*)(buffer + nBytes - 2);
     if (checksum((unsigned short*)buffer, (nBytes-2)/2) == recv_cksum) {
         printf(" checksum passed\n");
+        printf(" checksum: 0x%X\n", recv_cksum);
+
+        printf("\n-------------------\n\n");
+
+        return 0; // indicate success
     } else {
         printf(" checksum failed\n");
-    }
-	
-	printf(" checksum: 0x%X\n", recv_cksum);
+        printf(" checksum: 0x%X\n", recv_cksum);
 
-    return 0;
+        printf("\n-------------------\n\n");
+
+        return 1; // indicate failure
+    }
 }
 	
 int main() {
@@ -146,12 +152,14 @@ int main() {
     }
 
     sendRHP(serverAddr, clientSocket, "hi"); //odd length
-    receiveMSG(nBytes, clientSocket, buffer);
-
-    printf("\n-------------------\n\n");
+    while (receiveMSG(nBytes, clientSocket, buffer)){
+        sendRHP(serverAddr, clientSocket, "hi"); // send until valid message received
+    }
 
     sendRHP(serverAddr, clientSocket, "hello"); //even length
-    receiveMSG(nBytes, clientSocket, buffer);
+    while (receiveMSG(nBytes, clientSocket, buffer)){
+        sendRHP(serverAddr, clientSocket, "hello"); // send until valid message received
+    }
 
 	
     close(clientSocket);
